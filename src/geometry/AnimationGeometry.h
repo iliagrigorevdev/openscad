@@ -18,6 +18,7 @@ public:
     void accept(GeometryVisitor& visitor) const override {
         visitor.visit(static_cast<const GeometryList&>(*this)); 
     }
+    bool isEmpty() const override { return false; } // Armatures are structurally significant!
     size_t memsize() const override { return GeometryList::memsize() + sizeof(ArmatureGeometry); }
     std::unique_ptr<Geometry> copy() const override { return std::make_unique<ArmatureGeometry>(*this); }
     std::string dump() const override { return "ArmatureGeometry\n" + GeometryList::dump(); }
@@ -38,6 +39,7 @@ public:
     void accept(GeometryVisitor& visitor) const override {
         visitor.visit(static_cast<const GeometryList&>(*this)); 
     }
+    bool isEmpty() const override { return false; } // Bones are structurally significant!
     size_t memsize() const override { return GeometryList::memsize() + sizeof(BoneGeometry); }
     std::unique_ptr<Geometry> copy() const override { return std::make_unique<BoneGeometry>(*this); }
     std::string dump() const override { return "BoneGeometry(" + name + ")\n" + GeometryList::dump(); }
