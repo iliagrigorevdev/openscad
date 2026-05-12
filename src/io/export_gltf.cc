@@ -35,6 +35,12 @@ static std::string base64_encode(const unsigned char* data, size_t len) {
     return ret;
 }
 
+struct ExportBone {
+    int joint_idx;
+    int armature_idx;
+    Vector3d origin;
+};
+
 struct PrimitiveInfo {
     int color_idx;
     std::vector<uint32_t> indices;
@@ -53,6 +59,12 @@ struct MeshInfo {
     std::vector<std::vector<double>> target_min_pos;
     std::vector<std::vector<double>> target_max_pos;
     std::vector<double> weights;
+
+    bool needs_auto_weighting = false;
+    int armature_idx = -1;
+    std::vector<Vector3d> absolute_positions;
+    std::vector<uint16_t> joints_data;
+    std::vector<float> weights_data;
 };
 
 // Map Z-Up (OpenSCAD) to Y-Up (glTF)
@@ -83,7 +95,8 @@ int traverse_gltf(const std::shared_ptr<const Geometry>& geom, int parent_node_i
                   std::map<std::string, int>& bone_to_node, std::map<std::string, bool>& is_morph_node, Value& global_anims,
                   Transform3d C, Transform3d M_accum, int current_joint_idx,
                   std::vector<int>& gltf_joints, std::vector<Transform3d>& inverse_bind_matrices,
-                  std::vector<int>& scene_nodes) 
+                  std::vector<int>& scene_nodes,
+                  int current_armature_idx, std::vector<ExportBone>& all_export_bones, int& num_armatures)
 {
     if (auto armature = std::dynamic_pointer_cast<const ArmatureGeometry>(geom)) {
         if (armature->animations.type() == Value::Type::VECTOR) {
@@ -102,9 +115,11 @@ int traverse_gltf(const std::shared_ptr<const Geometry>& geom, int parent_node_i
         
         // If this node has no parent, insert it directly at the root of the scene
         if (parent_node_idx < 0) scene_nodes.push_back(node_idx);
-        
+
+        int this_armature_idx = num_armatures++;
+ 
         for (const auto& item : armature->getChildren()) {
-            int child_idx = traverse_gltf(item.second, node_idx, model, meshes_info, bone_to_node, is_morph_node, global_anims, C, M_accum, current_joint_idx, gltf_joints, inverse_bind_matrices, scene_nodes);
+            int child_idx = traverse_gltf(item.second, node_idx, model, meshes_info, bone_to_node, is_morph_node, global_anims, C, M_accum, current_joint_idx, gltf_joints, inverse_bind_matrices, scene_nodes, this_armature_idx, all_export_bones, num_armatures);
             if (child_idx >= 0) model.nodes[node_idx].children.push_back(child_idx);
         }
         return node_idx;
@@ -143,9 +158,10 @@ int traverse_gltf(const std::shared_ptr<const Geometry>& geom, int parent_node_i
         int joint_idx = gltf_joints.size();
         gltf_joints.push_back(node_idx);
         inverse_bind_matrices.push_back(inv_bind);
+        all_export_bones.push_back({joint_idx, current_armature_idx, next_M_accum.translation()});
         
         for (const auto& item : bone->getChildren()) {
-            int child_idx = traverse_gltf(item.second, node_idx, model, meshes_info, bone_to_node, is_morph_node, global_anims, C, next_M_accum, joint_idx, gltf_joints, inverse_bind_matrices, scene_nodes);
+            int child_idx = traverse_gltf(item.second, node_idx, model, meshes_info, bone_to_node, is_morph_node, global_anims, C, next_M_accum, joint_idx, gltf_joints, inverse_bind_matrices, scene_nodes, current_armature_idx, all_export_bones, num_armatures);
             if (child_idx >= 0) model.nodes[node_idx].children.push_back(child_idx);
         }
         return node_idx;
@@ -182,11 +198,16 @@ int traverse_gltf(const std::shared_ptr<const Geometry>& geom, int parent_node_i
             minfo.ps = base_ps;
             minfo.target_node = node_idx;
             minfo.joint_idx = current_joint_idx;
+            minfo.armature_idx = current_armature_idx;
+            if (current_armature_idx != -1 && current_joint_idx == -1) {
+                minfo.needs_auto_weighting = true;
+            }
             for(int i = 0; i < 3; ++i) { minfo.min_pos[i] = FLT_MAX; minfo.max_pos[i] = -FLT_MAX; }
 
             for (const auto& v : base_ps->vertices) {
                 Vector3d absolute_v = M_accum * v;
                 Vector3d gltf_v = C * absolute_v;
+                if (minfo.needs_auto_weighting) minfo.absolute_positions.push_back(absolute_v);
 
                 minfo.positions.push_back(gltf_v.x());
                 minfo.positions.push_back(gltf_v.y());
@@ -262,7 +283,7 @@ int traverse_gltf(const std::shared_ptr<const Geometry>& geom, int parent_node_i
     else if (std::dynamic_pointer_cast<const GeometryList>(geom) && contains_animated_node(geom)) {
         auto geomList = std::dynamic_pointer_cast<const GeometryList>(geom);
         for (const auto& item : geomList->getChildren()) {
-            int child_idx = traverse_gltf(item.second, parent_node_idx, model, meshes_info, bone_to_node, is_morph_node, global_anims, C, M_accum, current_joint_idx, gltf_joints, inverse_bind_matrices, scene_nodes);
+            int child_idx = traverse_gltf(item.second, parent_node_idx, model, meshes_info, bone_to_node, is_morph_node, global_anims, C, M_accum, current_joint_idx, gltf_joints, inverse_bind_matrices, scene_nodes, current_armature_idx, all_export_bones, num_armatures);
             if (child_idx >= 0 && parent_node_idx >= 0) {
                 model.nodes[parent_node_idx].children.push_back(child_idx);
             }
@@ -279,12 +300,17 @@ int traverse_gltf(const std::shared_ptr<const Geometry>& geom, int parent_node_i
             minfo.ps = ps;
             minfo.target_node = parent_node_idx;
             minfo.joint_idx = current_joint_idx;
+            minfo.armature_idx = current_armature_idx;
+            if (current_armature_idx != -1 && current_joint_idx == -1) {
+                minfo.needs_auto_weighting = true;
+            }
             for(int i = 0; i < 3; ++i) { minfo.min_pos[i] = FLT_MAX; minfo.max_pos[i] = -FLT_MAX; }
 
             for (const auto& v : ps->vertices) {
                 // v is inside the bone's local mathematical space.
                 // Shift it to explicit Absolute OpenSCAD world space using the true matrix accumulator
                 Vector3d absolute_v = M_accum * v;
+                if (minfo.needs_auto_weighting) minfo.absolute_positions.push_back(absolute_v);
                 
                 // Map the absolute vectors into glTF Y-Up world space
                 Vector3d gltf_v = C * absolute_v;
@@ -372,9 +398,11 @@ void export_gltf(const std::shared_ptr<const Geometry>& geom, std::ostream& outp
     std::vector<int> gltf_joints;
     std::vector<Transform3d> inverse_bind_matrices;
     std::vector<int> scene_nodes;
+    std::vector<ExportBone> all_export_bones;
+    int num_armatures = 0;
 
     // 1. Traverse and generate Scene Graph
-    traverse_gltf(geom, -1, model, meshes_info, bone_to_node, is_morph_node, global_anims, C, Transform3d::Identity(), -1, gltf_joints, inverse_bind_matrices, scene_nodes);
+    traverse_gltf(geom, -1, model, meshes_info, bone_to_node, is_morph_node, global_anims, C, Transform3d::Identity(), -1, gltf_joints, inverse_bind_matrices, scene_nodes, -1, all_export_bones, num_armatures);
 
     if (meshes_info.empty() && model.nodes.empty()) return;
 
@@ -406,6 +434,46 @@ void export_gltf(const std::shared_ptr<const Geometry>& geom, std::ostream& outp
         model.skins.push_back(skin);
     }
 
+    // Pre-calculate smooth skinning weights for dynamically bound meshes
+    for (auto& minfo : meshes_info) {
+        if (!minfo.needs_auto_weighting) continue;
+
+        bool has_bones = false;
+        for (const auto& b : all_export_bones) {
+            if (b.armature_idx == minfo.armature_idx) { has_bones = true; break; }
+        }
+        if (!has_bones) {
+            minfo.needs_auto_weighting = false;
+            continue;
+        }
+
+        minfo.joints_data.reserve(minfo.absolute_positions.size() * 4);
+        minfo.weights_data.reserve(minfo.absolute_positions.size() * 4);
+
+        for (const auto& v : minfo.absolute_positions) {
+            std::vector<std::pair<double, int>> dists;
+            for (const auto& b : all_export_bones) {
+                if (b.armature_idx == minfo.armature_idx) {
+                    dists.push_back({(v - b.origin).norm(), b.joint_idx});
+                }
+            }
+            std::sort(dists.begin(), dists.end());
+
+            double sum = 0;
+            std::vector<float> w(4, 0.0f);
+            std::vector<uint16_t> j(4, 0);
+            for (size_t i = 0; i < 4 && i < dists.size(); ++i) {
+                w[i] = 1.0f / (float)(dists[i].first * dists[i].first * dists[i].first * dists[i].first + 1e-6);
+                j[i] = dists[i].second;
+                sum += w[i];
+            }
+            for (int i = 0; i < 4; ++i) {
+                minfo.joints_data.push_back(j[i]);
+                minfo.weights_data.push_back(sum > 0 ? w[i] / (float)sum : 0.0f);
+            }
+        }
+    }
+
     // 3. Process Meshes
     for (const auto& minfo : meshes_info) {
         int pos_accessor_idx = append_to_bin(bin_data, minfo.positions, model, 
@@ -427,6 +495,9 @@ void export_gltf(const std::shared_ptr<const Geometry>& geom, std::ostream& outp
             }
             joints_acc = append_to_bin(bin_data, joints_data, model, TINYGLTF_TARGET_ARRAY_BUFFER, TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT, TINYGLTF_TYPE_VEC4);
             weights_acc = append_to_bin(bin_data, weights_data, model, TINYGLTF_TARGET_ARRAY_BUFFER, TINYGLTF_COMPONENT_TYPE_FLOAT, TINYGLTF_TYPE_VEC4);
+        } else if (minfo.needs_auto_weighting) {
+            joints_acc = append_to_bin(bin_data, minfo.joints_data, model, TINYGLTF_TARGET_ARRAY_BUFFER, TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT, TINYGLTF_TYPE_VEC4);
+            weights_acc = append_to_bin(bin_data, minfo.weights_data, model, TINYGLTF_TARGET_ARRAY_BUFFER, TINYGLTF_COMPONENT_TYPE_FLOAT, TINYGLTF_TYPE_VEC4);
         }
 
         tinygltf::Mesh mesh;
@@ -606,7 +677,8 @@ void export_gltf(const std::shared_ptr<const Geometry>& geom, std::ostream& outp
         int mesh_idx = model.meshes.size();
         model.meshes.push_back(mesh);
 
-        if (minfo.target_node >= 0 && minfo.joint_idx == -1) {
+        if (minfo.target_node >= 0 && minfo.joint_idx == -1 && !minfo.needs_auto_weighting) {
+            // Unskinned mesh tied to parent node (e.g. armature node)
             if (model.nodes[minfo.target_node].mesh == -1) {
                 model.nodes[minfo.target_node].mesh = mesh_idx;
             } else {
@@ -617,10 +689,11 @@ void export_gltf(const std::shared_ptr<const Geometry>& geom, std::ostream& outp
                 model.nodes[minfo.target_node].children.push_back(child_node_idx);
             }
         } else {
+            // Skinned mesh (auto-weighted or rigidly bound) -> independent node at scene root
             int new_node_idx = model.nodes.size();
             tinygltf::Node node;
             node.mesh = mesh_idx;
-            if (minfo.joint_idx != -1) {
+            if (minfo.joint_idx != -1 || minfo.needs_auto_weighting) {
                 node.skin = 0; 
             }
             model.nodes.push_back(node);
