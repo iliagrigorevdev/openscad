@@ -63,6 +63,8 @@ ManifoldGeometry::ManifoldGeometry(manifold::Manifold mani, const std::set<uint3
                                    const std::map<uint32_t, float>& originalIDToSpecularIntensity,
                                    const std::map<uint32_t, float>& originalIDToIridescence,
                                    const std::map<uint32_t, float>& originalIDToIridescenceIOR,
+                                   const std::map<uint32_t, std::vector<std::string>>& originalIDToBones,
+                                   const std::map<uint32_t, std::vector<float>>& originalIDToWeights,
                                    const std::set<uint32_t>& subtractedIDs)
   : manifold_(std::move(mani)),
     originalIDs_(originalIDs),
@@ -85,6 +87,8 @@ ManifoldGeometry::ManifoldGeometry(manifold::Manifold mani, const std::set<uint3
     originalIDToSpecularIntensity_(originalIDToSpecularIntensity),
     originalIDToIridescence_(originalIDToIridescence),
     originalIDToIridescenceIOR_(originalIDToIridescenceIOR),
+    originalIDToBones_(originalIDToBones),
+    originalIDToWeights_(originalIDToWeights),
     subtractedIDs_(subtractedIDs)
 {
 }
@@ -179,6 +183,9 @@ std::shared_ptr<PolySet> ManifoldGeometry::toPolySet() const
 
   ps->colors.reserve(originalIDToColor_.size());
   ps->color_indices.reserve(ps->indices.size());
+  ps->weight_indices.reserve(mesh.NumTri());
+  ps->bone_names_array.reserve(originalIDToColor_.size());
+  ps->bone_weights_array.reserve(originalIDToColor_.size());
 
   auto colorScheme = ColorMap::inst()->findColorScheme(RenderSettings::inst()->colorscheme);
   int32_t faceFrontColorIndex = -1;
@@ -204,7 +211,11 @@ std::shared_ptr<PolySet> ManifoldGeometry::toPolySet() const
     float specularIntensity;
     float iridescence;
     float iridescenceIOR;
+    std::vector<std::string> bones;
+    std::vector<float> weights;
     bool operator<(const MaterialState& other) const {
+      if (bones != other.bones) return bones < other.bones;
+      if (weights != other.weights) return weights < other.weights;
       if (color.r() != other.color.r()) return color.r() < other.color.r();
       if (color.g() != other.color.g()) return color.g() < other.color.g();
       if (color.b() != other.color.b()) return color.b() < other.color.b();
@@ -268,6 +279,8 @@ std::shared_ptr<PolySet> ManifoldGeometry::toPolySet() const
       ps->specularIntensities.push_back(1.0f);
       ps->iridescences.push_back(0.0f);
       ps->iridescenceIORs.push_back(1.3f);
+      ps->bone_names_array.push_back({});
+      ps->bone_weights_array.push_back({});
     }
     return faceFrontColorIndex;
   };
@@ -388,7 +401,15 @@ std::shared_ptr<PolySet> ManifoldGeometry::toPolySet() const
     auto iridIORIt = originalIDToIridescenceIOR_.find(originalID);
     if (iridIORIt != originalIDToIridescenceIOR_.end()) iridescenceIOR = iridIORIt->second;
 
-    auto matIt = materialToIndex.lower_bound({color, roughness, metalness, clearcoat, clearcoatRoughness, sheen, sheenColor, sheenRoughness, transmission, thickness, attenuationColor, attenuationDistance, ior, emissive, emissiveIntensity, specularColor, specularIntensity, iridescence, iridescenceIOR});
+    std::vector<std::string> bones;
+    auto boneIt = originalIDToBones_.find(originalID);
+    if (boneIt != originalIDToBones_.end()) bones = boneIt->second;
+
+    std::vector<float> weights;
+    auto weightIt = originalIDToWeights_.find(originalID);
+    if (weightIt != originalIDToWeights_.end()) weights = weightIt->second;
+
+    auto matIt = materialToIndex.lower_bound({color, roughness, metalness, clearcoat, clearcoatRoughness, sheen, sheenColor, sheenRoughness, transmission, thickness, attenuationColor, attenuationDistance, ior, emissive, emissiveIntensity, specularColor, specularIntensity, iridescence, iridescenceIOR, bones, weights});
     bool match = false;
     if (matIt != materialToIndex.end()) {
       const auto& c1 = matIt->first.color;
@@ -410,7 +431,8 @@ std::shared_ptr<PolySet> ManifoldGeometry::toPolySet() const
                matIt->first.specularColor.r() == specularColor.r() && matIt->first.specularColor.g() == specularColor.g() &&
                matIt->first.specularColor.b() == specularColor.b() && matIt->first.specularColor.a() == specularColor.a() &&
                matIt->first.specularIntensity == specularIntensity &&
-               matIt->first.iridescence == iridescence && matIt->first.iridescenceIOR == iridescenceIOR);
+               matIt->first.iridescence == iridescence && matIt->first.iridescenceIOR == iridescenceIOR &&
+               matIt->first.bones == bones && matIt->first.weights == weights);
     }
 
     if (match) {
@@ -437,7 +459,9 @@ std::shared_ptr<PolySet> ManifoldGeometry::toPolySet() const
       ps->specularIntensities.push_back(specularIntensity);
       ps->iridescences.push_back(iridescence);
       ps->iridescenceIORs.push_back(iridescenceIOR);
-      materialToIndex.insert(matIt, {{color, roughness, metalness, clearcoat, clearcoatRoughness, sheen, sheenColor, sheenRoughness, transmission, thickness, attenuationColor, attenuationDistance, ior, emissive, emissiveIntensity, specularColor, specularIntensity, iridescence, iridescenceIOR}, color_index});
+      ps->bone_names_array.push_back(bones);
+      ps->bone_weights_array.push_back(weights);
+      materialToIndex.insert(matIt, {{color, roughness, metalness, clearcoat, clearcoatRoughness, sheen, sheenColor, sheenRoughness, transmission, thickness, attenuationColor, attenuationDistance, ior, emissive, emissiveIntensity, specularColor, specularIntensity, iridescence, iridescenceIOR, bones, weights}, color_index});
       originalIDToColorIndex[originalID] = color_index;
       return color_index;
     }
@@ -457,6 +481,7 @@ std::shared_ptr<PolySet> ManifoldGeometry::toPolySet() const
       ps->indices.push_back({static_cast<int>(mesh.triVerts[i]), static_cast<int>(mesh.triVerts[i + 1]),
                              static_cast<int>(mesh.triVerts[i + 2])});
       ps->color_indices.push_back(colorIndex);
+      ps->weight_indices.push_back(colorIndex);
     }
     start = end;
   }
@@ -537,6 +562,8 @@ ManifoldGeometry ManifoldGeometry::binOp(const ManifoldGeometry& lhs, const Mani
   auto originalIDToSpecularIntensity = lhs.originalIDToSpecularIntensity_;
   auto originalIDToIridescence = lhs.originalIDToIridescence_;
   auto originalIDToIridescenceIOR = lhs.originalIDToIridescenceIOR_;
+  auto originalIDToBones = lhs.originalIDToBones_;
+  auto originalIDToWeights = lhs.originalIDToWeights_;
   auto subtractedIDs = lhs.subtractedIDs_;
 
   auto originalIDs = lhs.originalIDs_;
@@ -592,6 +619,10 @@ ManifoldGeometry ManifoldGeometry::binOp(const ManifoldGeometry& lhs, const Mani
         originalIDToIridescence[id] = iriIt != rhs.originalIDToIridescence_.end() ? iriIt->second : 0.0f;
         auto iriIorIt = rhs.originalIDToIridescenceIOR_.find(id);
         originalIDToIridescenceIOR[id] = iriIorIt != rhs.originalIDToIridescenceIOR_.end() ? iriIorIt->second : 1.3f;
+        auto boneIt = rhs.originalIDToBones_.find(id);
+        if (boneIt != rhs.originalIDToBones_.end()) originalIDToBones[id] = boneIt->second;
+        auto weightIt = rhs.originalIDToWeights_.find(id);
+        if (weightIt != rhs.originalIDToWeights_.end()) originalIDToWeights[id] = weightIt->second;
       } else {
         subtractedIDs.insert(id);
       }
@@ -617,9 +648,11 @@ ManifoldGeometry ManifoldGeometry::binOp(const ManifoldGeometry& lhs, const Mani
     originalIDToSpecularIntensity.insert(rhs.originalIDToSpecularIntensity_.begin(), rhs.originalIDToSpecularIntensity_.end());
     originalIDToIridescence.insert(rhs.originalIDToIridescence_.begin(), rhs.originalIDToIridescence_.end());
     originalIDToIridescenceIOR.insert(rhs.originalIDToIridescenceIOR_.begin(), rhs.originalIDToIridescenceIOR_.end());
+    originalIDToBones.insert(rhs.originalIDToBones_.begin(), rhs.originalIDToBones_.end());
+    originalIDToWeights.insert(rhs.originalIDToWeights_.begin(), rhs.originalIDToWeights_.end());
     subtractedIDs.insert(rhs.subtractedIDs_.begin(), rhs.subtractedIDs_.end());
   }
-  return {mani, originalIDs, originalIDToColor, originalIDToRoughness, originalIDToMetalness, originalIDToClearcoat, originalIDToClearcoatRoughness, originalIDToSheen, originalIDToSheenColor, originalIDToSheenRoughness, originalIDToTransmission, originalIDToThickness, originalIDToAttenuationColor, originalIDToAttenuationDistance, originalIDToIOR, originalIDToEmissive, originalIDToEmissiveIntensity, originalIDToSpecularColor, originalIDToSpecularIntensity, originalIDToIridescence, originalIDToIridescenceIOR, subtractedIDs};
+  return {mani, originalIDs, originalIDToColor, originalIDToRoughness, originalIDToMetalness, originalIDToClearcoat, originalIDToClearcoatRoughness, originalIDToSheen, originalIDToSheenColor, originalIDToSheenRoughness, originalIDToTransmission, originalIDToThickness, originalIDToAttenuationColor, originalIDToAttenuationDistance, originalIDToIOR, originalIDToEmissive, originalIDToEmissiveIntensity, originalIDToSpecularColor, originalIDToSpecularIntensity, originalIDToIridescence, originalIDToIridescenceIOR, originalIDToBones, originalIDToWeights, subtractedIDs};
 }
 
 std::shared_ptr<ManifoldGeometry> minkowskiOp(const ManifoldGeometry& lhs, const ManifoldGeometry& rhs)
@@ -702,6 +735,20 @@ void ManifoldGeometry::transform(const Transform3d& mat)
   manifold_ = getManifold().Transform(glMat);
 }
 
+void ManifoldGeometry::setWeight(const std::vector<std::string>& bones, const std::vector<float>& weights)
+{
+  if (manifold_.OriginalID() == -1) {
+    manifold_ = manifold_.AsOriginal();
+  }
+  originalIDs_.clear();
+  originalIDs_.insert(manifold_.OriginalID());
+  originalIDToBones_.clear();
+  originalIDToBones_[manifold_.OriginalID()] = bones;
+  originalIDToWeights_.clear();
+  originalIDToWeights_[manifold_.OriginalID()] = weights;
+  subtractedIDs_.clear();
+}
+
 void ManifoldGeometry::setColor(const Color4f& c, float roughness, float metalness, float clearcoat, float clearcoatRoughness, float sheen, const Color4f& sheenColor, float sheenRoughness, float transmission, float thickness, const Color4f& attenuationColor, float attenuationDistance, float ior, const Color4f& emissive, float emissiveIntensity, const Color4f& specularColor, float specularIntensity, float iridescence, float iridescenceIOR)
 {
   if (manifold_.OriginalID() == -1) {
@@ -776,6 +823,8 @@ void ManifoldGeometry::toOriginal()
   originalIDToSpecularIntensity_.clear();
   originalIDToIridescence_.clear();
   originalIDToIridescenceIOR_.clear();
+  originalIDToBones_.clear();
+  originalIDToWeights_.clear();
   subtractedIDs_.clear();
 }
 

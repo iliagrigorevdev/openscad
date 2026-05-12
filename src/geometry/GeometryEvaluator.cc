@@ -638,6 +638,27 @@ Response GeometryEvaluator::visit(State& state, const ArmatureNode& node)
   return Response::ContinueTraversal;
 }
 
+Response GeometryEvaluator::visit(State& state, const WeightNode& node)
+{
+  if (state.isPrefix() && isSmartCached(node)) return Response::PruneTraversal;
+  if (state.isPostfix()) {
+    std::shared_ptr<const Geometry> geom;
+    if (!isSmartCached(node)) {
+      ResultObject res = applyToChildren(node, OpenSCADOperator::UNION);
+      if ((geom = res.constptr())) {
+        auto mutableGeom = res.asMutableGeometry();
+        if (mutableGeom) mutableGeom->setWeight(node.bone_names, node.weights);
+        geom = mutableGeom;
+      }
+    } else {
+      geom = smartCacheGet(node, state.preferNef());
+    }
+    addToParent(state, node, geom);
+    node.progress_report();
+  }
+  return Response::ContinueTraversal;
+}
+
 Response GeometryEvaluator::visit(State& state, const BoneNode& node)
 {
   if (state.isPrefix()) {

@@ -350,6 +350,14 @@ Response CSGTreeEvaluator::visit(State& state, const ArmatureNode& node) {
   return Response::ContinueTraversal;
 }
 
+Response CSGTreeEvaluator::visit(State& state, const WeightNode& node) {
+  if (state.isPostfix()) {
+    applyToChildren(state, node, OpenSCADOperator::UNION);
+    addToParent(state, node);
+  }
+  return Response::ContinueTraversal;
+}
+
 Response CSGTreeEvaluator::visit(State& state, const BoneNode& node) {
   if (state.isPrefix()) {
     state.setMatrix(state.matrix() * node.matrix); // Applies Bone offset for F5 preview!

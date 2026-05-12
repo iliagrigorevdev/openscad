@@ -10,6 +10,30 @@ std::shared_ptr<AbstractNode> builtin_armature(const ModuleInstantiation *inst, 
     return children.instantiate(std::make_shared<ArmatureNode>(inst, parameters["animations"].clone()));
 }
 
+std::shared_ptr<AbstractNode> builtin_weight(const ModuleInstantiation *inst, Arguments arguments, const Children& children) {
+    Parameters parameters = Parameters::parse(std::move(arguments), inst->location(), {"bones", "weights"});
+    
+    std::vector<std::string> bone_names;
+    if (parameters["bones"].type() == Value::Type::VECTOR) {
+        for (const auto& v : parameters["bones"].toVector()) {
+            bone_names.push_back(v.toStrUtf8Wrapper().toString());
+        }
+    } else if (parameters["bones"].type() == Value::Type::STRING) {
+        bone_names.push_back(parameters["bones"].toStrUtf8Wrapper().toString());
+    }
+    
+    std::vector<float> weights;
+    if (parameters["weights"].type() == Value::Type::VECTOR) {
+        for (const auto& v : parameters["weights"].toVector()) {
+            weights.push_back(v.toDouble());
+        }
+    } else if (parameters["weights"].type() == Value::Type::NUMBER) {
+        weights.push_back(parameters["weights"].toDouble());
+    }
+    
+    return children.instantiate(std::make_shared<WeightNode>(inst, bone_names, weights));
+}
+
 std::shared_ptr<AbstractNode> builtin_bone(const ModuleInstantiation *inst, Arguments arguments, const Children& children) {
     Parameters parameters = Parameters::parse(std::move(arguments), inst->location(), {"name", "t", "r"});
     
@@ -35,4 +59,5 @@ std::shared_ptr<AbstractNode> builtin_bone(const ModuleInstantiation *inst, Argu
 void register_builtin_animation() {
     Builtins::init("armature", new BuiltinModule(builtin_armature), {"armature(animations=array)"});
     Builtins::init("bone", new BuiltinModule(builtin_bone), {"bone(name=\"\", t=[x,y,z], r=[x,y,z])"});
+    Builtins::init("weight", new BuiltinModule(builtin_weight), {"weight(bones=[], weights=[])"});
 }

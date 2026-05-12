@@ -105,6 +105,8 @@ std::unique_ptr<PolySet> tessellate_faces(const PolySet& polyset)
   polygons.reserve(polyset.indices.size());
   std::vector<int32_t> polygon_color_indices;
   auto has_colors = !polyset.color_indices.empty();
+  std::vector<int32_t> polygon_weight_indices;
+  auto has_weights = !polyset.weight_indices.empty();
   if (has_colors) {
     assert(polyset.color_indices.size() == polyset.indices.size());
     polygon_color_indices.reserve(polyset.color_indices.size());
@@ -128,6 +130,12 @@ std::unique_ptr<PolySet> tessellate_faces(const PolySet& polyset)
     result->iridescences = polyset.iridescences;
     result->iridescenceIORs = polyset.iridescenceIORs;
   }
+  if (has_weights) {
+    assert(polyset.weight_indices.size() == polyset.indices.size());
+    polygon_weight_indices.reserve(polyset.weight_indices.size());
+    result->bone_names_array = polyset.bone_names_array;
+    result->bone_weights_array = polyset.bone_weights_array;
+  }
   for (size_t i = 0, n = polyset.indices.size(); i < n; i++) {
     const auto& pgon = polyset.indices[i];
     if (pgon.size() < 3) {
@@ -149,6 +157,9 @@ std::unique_ptr<PolySet> tessellate_faces(const PolySet& polyset)
     }
     if (has_colors) {
       polygon_color_indices.push_back(polyset.color_indices[i]);
+    }
+    if (has_weights) {
+      polygon_weight_indices.push_back(polyset.weight_indices[i]);
     }
     for (const auto& ind : currface) used[ind] = true;
   }
@@ -179,6 +190,7 @@ std::unique_ptr<PolySet> tessellate_faces(const PolySet& polyset)
       // trivial case - triangles cannot be concave or have holes
       result->indices.push_back({face[0], face[1], face[2]});
       if (has_colors) result->color_indices.push_back(polygon_color_indices[i]);
+      if (has_weights) result->weight_indices.push_back(polygon_weight_indices[i]);
     }
     // Quads seem trivial, but can be concave, and can have degenerate cases.
     // So everything more complex than triangles goes into the general case.
@@ -190,6 +202,7 @@ std::unique_ptr<PolySet> tessellate_faces(const PolySet& polyset)
         for (const auto& t : triangles) {
           result->indices.push_back({t[0], t[1], t[2]});
           if (has_colors) result->color_indices.push_back(polygon_color_indices[i]);
+          if (has_weights) result->weight_indices.push_back(polygon_weight_indices[i]);
         }
       }
     }

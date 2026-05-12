@@ -43,6 +43,9 @@ struct PrimitiveInfo {
 
 struct MeshInfo {
     std::vector<float> positions;
+    std::vector<uint16_t> joints;
+    std::vector<float> weights;
+    bool has_weights = false;
     float min_pos[3];
     float max_pos[3];
     std::vector<PrimitiveInfo> primitives;
@@ -78,7 +81,7 @@ int traverse_gltf(const std::shared_ptr<const Geometry>& geom, int parent_node_i
                   std::map<std::string, int>& bone_to_node, Value& global_anims, 
                   Transform3d C, Transform3d M_accum, int current_joint_idx,
                   std::vector<int>& gltf_joints, std::vector<Transform3d>& inverse_bind_matrices,
-                  std::vector<int>& scene_nodes) 
+                  std::vector<int>& scene_nodes, std::map<std::string, int>& bone_to_joint) 
 {
     if (auto armature = std::dynamic_pointer_cast<const ArmatureGeometry>(geom)) {
         if (armature->animations.type() == Value::Type::VECTOR) {
@@ -93,7 +96,7 @@ int traverse_gltf(const std::shared_ptr<const Geometry>& geom, int parent_node_i
         if (parent_node_idx < 0) scene_nodes.push_back(node_idx);
         
         for (const auto& item : armature->getChildren()) {
-            int child_idx = traverse_gltf(item.second, node_idx, model, meshes_info, bone_to_node, global_anims, C, M_accum, current_joint_idx, gltf_joints, inverse_bind_matrices, scene_nodes);
+            int child_idx = traverse_gltf(item.second, node_idx, model, meshes_info, bone_to_node, global_anims, C, M_accum, current_joint_idx, gltf_joints, inverse_bind_matrices, scene_nodes, bone_to_joint);
             if (child_idx >= 0) model.nodes[node_idx].children.push_back(child_idx);
         }
         return node_idx;
@@ -131,10 +134,11 @@ int traverse_gltf(const std::shared_ptr<const Geometry>& geom, int parent_node_i
         
         int joint_idx = gltf_joints.size();
         gltf_joints.push_back(node_idx);
+        bone_to_joint[bone->name] = joint_idx;
         inverse_bind_matrices.push_back(inv_bind);
         
         for (const auto& item : bone->getChildren()) {
-            int child_idx = traverse_gltf(item.second, node_idx, model, meshes_info, bone_to_node, global_anims, C, next_M_accum, joint_idx, gltf_joints, inverse_bind_matrices, scene_nodes);
+            int child_idx = traverse_gltf(item.second, node_idx, model, meshes_info, bone_to_node, global_anims, C, next_M_accum, joint_idx, gltf_joints, inverse_bind_matrices, scene_nodes, bone_to_joint);
             if (child_idx >= 0) model.nodes[node_idx].children.push_back(child_idx);
         }
         return node_idx;
@@ -143,7 +147,7 @@ int traverse_gltf(const std::shared_ptr<const Geometry>& geom, int parent_node_i
     else if (std::dynamic_pointer_cast<const GeometryList>(geom) && contains_bone(geom)) {
         auto geomList = std::dynamic_pointer_cast<const GeometryList>(geom);
         for (const auto& item : geomList->getChildren()) {
-            int child_idx = traverse_gltf(item.second, parent_node_idx, model, meshes_info, bone_to_node, global_anims, C, M_accum, current_joint_idx, gltf_joints, inverse_bind_matrices, scene_nodes);
+            int child_idx = traverse_gltf(item.second, parent_node_idx, model, meshes_info, bone_to_node, global_anims, C, M_accum, current_joint_idx, gltf_joints, inverse_bind_matrices, scene_nodes, bone_to_joint);
             if (child_idx >= 0 && parent_node_idx >= 0) {
                 model.nodes[parent_node_idx].children.push_back(child_idx);
             }
@@ -161,6 +165,56 @@ int traverse_gltf(const std::shared_ptr<const Geometry>& geom, int parent_node_i
             minfo.target_node = parent_node_idx;
             minfo.joint_idx = current_joint_idx;
             for(int i = 0; i < 3; ++i) { minfo.min_pos[i] = FLT_MAX; minfo.max_pos[i] = -FLT_MAX; }
+
+            std::vector<uint16_t> mesh_joints(ps->vertices.size() * 4, 0);
+            std::vector<float> mesh_weights(ps->vertices.size() * 4, 0.0f);
+            bool has_weights = false;
+
+            if (minfo.joint_idx != -1) {
+                for (size_t i = 0; i < ps->vertices.size(); ++i) {
+                    mesh_joints[i * 4 + 0] = minfo.joint_idx;
+                    mesh_weights[i * 4 + 0] = 1.0f;
+                }
+                has_weights = true;
+            } else if (!ps->weight_indices.empty()) {
+                // Apply weights per face to vertices
+                for (size_t i = 0; i < ps->indices.size(); ++i) {
+                    int w_idx = ps->weight_indices[i];
+                    if (w_idx >= 0 && w_idx < (int)ps->bone_names_array.size()) {
+                        const auto& b_names = ps->bone_names_array[w_idx];
+                        const auto& b_weights = ps->bone_weights_array[w_idx];
+                        
+                        uint16_t j[4] = {0, 0, 0, 0};
+                        float w[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                        for (size_t k = 0; k < std::min<size_t>(4, b_names.size()); ++k) {
+                            if (bone_to_joint.find(b_names[k]) != bone_to_joint.end()) {
+                                j[k] = bone_to_joint[b_names[k]];
+                                w[k] = b_weights[k];
+                            }
+                        }
+                        
+                        // Normalize weights
+                        float sum = w[0] + w[1] + w[2] + w[3];
+                        if (sum > 0.0f) {
+                            for (int k = 0; k < 4; ++k) w[k] /= sum;
+                        }
+
+                        for (int v_idx : ps->indices[i]) {
+                            for (int k = 0; k < 4; ++k) {
+                                mesh_joints[v_idx * 4 + k] = j[k];
+                                mesh_weights[v_idx * 4 + k] = w[k];
+                            }
+                        }
+                        has_weights = true;
+                    }
+                }
+            }
+
+            if (has_weights) {
+                minfo.joints = std::move(mesh_joints);
+                minfo.weights = std::move(mesh_weights);
+                minfo.has_weights = true;
+            }
 
             for (const auto& v : ps->vertices) {
                 // v is inside the bone's local mathematical space.
@@ -252,9 +306,10 @@ void export_gltf(const std::shared_ptr<const Geometry>& geom, std::ostream& outp
     std::vector<int> gltf_joints;
     std::vector<Transform3d> inverse_bind_matrices;
     std::vector<int> scene_nodes;
+    std::map<std::string, int> bone_to_joint;
 
     // 1. Traverse and generate Scene Graph
-    traverse_gltf(geom, -1, model, meshes_info, bone_to_node, global_anims, C, Transform3d::Identity(), -1, gltf_joints, inverse_bind_matrices, scene_nodes);
+    traverse_gltf(geom, -1, model, meshes_info, bone_to_node, global_anims, C, Transform3d::Identity(), -1, gltf_joints, inverse_bind_matrices, scene_nodes, bone_to_joint);
 
     if (meshes_info.empty() && model.nodes.empty()) return;
 
@@ -296,17 +351,9 @@ void export_gltf(const std::shared_ptr<const Geometry>& geom, std::ostream& outp
         int joints_acc = -1;
         int weights_acc = -1;
         
-        // Rigidly bind to joint directly modifying vertices inside the shader
-        if (minfo.joint_idx != -1) {
-            size_t vertex_count = minfo.positions.size() / 3;
-            std::vector<uint16_t> joints_data(vertex_count * 4, 0);
-            std::vector<float> weights_data(vertex_count * 4, 0.0f);
-            for (size_t i = 0; i < vertex_count; ++i) {
-                joints_data[i * 4 + 0] = minfo.joint_idx;
-                weights_data[i * 4 + 0] = 1.0f;
-            }
-            joints_acc = append_to_bin(bin_data, joints_data, model, TINYGLTF_TARGET_ARRAY_BUFFER, TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT, TINYGLTF_TYPE_VEC4);
-            weights_acc = append_to_bin(bin_data, weights_data, model, TINYGLTF_TARGET_ARRAY_BUFFER, TINYGLTF_COMPONENT_TYPE_FLOAT, TINYGLTF_TYPE_VEC4);
+        if (minfo.has_weights && !gltf_joints.empty()) {
+            joints_acc = append_to_bin(bin_data, minfo.joints, model, TINYGLTF_TARGET_ARRAY_BUFFER, TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT, TINYGLTF_TYPE_VEC4);
+            weights_acc = append_to_bin(bin_data, minfo.weights, model, TINYGLTF_TARGET_ARRAY_BUFFER, TINYGLTF_COMPONENT_TYPE_FLOAT, TINYGLTF_TYPE_VEC4);
         }
 
         tinygltf::Mesh mesh;

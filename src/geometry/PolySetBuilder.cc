@@ -317,6 +317,39 @@ void PolySetBuilder::appendPolySet(const PolySet& ps)
     color_indices_.resize(color_indices_.size() + ps.indices.size(), -1);
   }
 
+  if (!ps.weight_indices.empty()) {
+    if (weight_indices_.empty() && !indices_.empty()) {
+      weight_indices_.resize(indices_.size(), -1);
+    }
+    weight_indices_.reserve(weight_indices_.size() + ps.weight_indices.size());
+
+    auto nWeights = ps.bone_names_array.size();
+    std::vector<uint32_t> weight_map(nWeights);
+    for (size_t i = 0; i < nWeights; i++) {
+      const auto& bones = ps.bone_names_array[i];
+      const auto& weights = ps.bone_weights_array[i];
+      int match_idx = -1;
+      for (size_t j = 0; j < bone_names_array_.size(); ++j) {
+        if (bone_names_array_[j] == bones && bone_weights_array_[j] == weights) {
+          match_idx = j;
+          break;
+        }
+      }
+      if (match_idx == -1) {
+        weight_map[i] = bone_names_array_.size();
+        bone_names_array_.push_back(bones);
+        bone_weights_array_.push_back(weights);
+      } else {
+        weight_map[i] = match_idx;
+      }
+    }
+    for (auto weight_index : ps.weight_indices) {
+      weight_indices_.push_back(weight_index < 0 ? -1 : weight_map[weight_index]);
+    }
+  } else if (!weight_indices_.empty()) {
+    weight_indices_.resize(weight_indices_.size() + ps.indices.size(), -1);
+  }
+
   reserve(numVertices() + ps.vertices.size(), numPolygons() + ps.indices.size());
   for (const auto& poly : ps.indices) {
     beginPolygon(poly.size());
@@ -354,6 +387,9 @@ std::unique_ptr<PolySet> PolySetBuilder::build()
   polyset->specularIntensities = std::move(specularIntensities_);
   polyset->iridescences = std::move(iridescences_);
   polyset->iridescenceIORs = std::move(iridescenceIORs_);
+  polyset->weight_indices = std::move(weight_indices_);
+  polyset->bone_names_array = std::move(bone_names_array_);
+  polyset->bone_weights_array = std::move(bone_weights_array_);
   polyset->setConvexity(convexity_);
   bool is_triangular = true;
   for (const auto& face : polyset->indices) {

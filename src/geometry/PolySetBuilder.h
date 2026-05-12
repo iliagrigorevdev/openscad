@@ -65,6 +65,9 @@ private:
   std::vector<float> specularIntensities_;
   std::vector<float> iridescences_;
   std::vector<float> iridescenceIORs_;
+  std::vector<int32_t> weight_indices_;
+  std::vector<std::vector<std::string>> bone_names_array_;
+  std::vector<std::vector<float>> bone_weights_array_;
   int convexity_{1};
   int dim_;
   boost::tribool convex_;

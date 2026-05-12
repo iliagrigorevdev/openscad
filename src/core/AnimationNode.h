@@ -11,6 +11,16 @@ public:
     std::string name() const override { return "armature"; }
 };
 
+class WeightNode : public AbstractNode {
+public:
+    VISITABLE();
+    std::vector<std::string> bone_names;
+    std::vector<float> weights;
+    WeightNode(const ModuleInstantiation *mi, std::vector<std::string> b, std::vector<float> w) 
+      : AbstractNode(mi), bone_names(std::move(b)), weights(std::move(w)) {}
+    std::string name() const override { return "weight"; }
+};
+
 class BoneNode : public TransformNode {
 public:
     VISITABLE();

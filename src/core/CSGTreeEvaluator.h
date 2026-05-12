@@ -39,6 +39,7 @@ public:
   Response visit(State& state, const CgalAdvNode& node) override;
   Response visit(State& state, const ArmatureNode& node) override;
   Response visit(State& state, const BoneNode& node) override;
+  Response visit(State& state, const WeightNode& node) override;
 
   std::shared_ptr<CSGNode> buildCSGTree(const AbstractNode& node);
 
