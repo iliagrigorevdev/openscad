@@ -361,6 +361,26 @@ Response CSGTreeEvaluator::visit(State& state, const BoneNode& node) {
   return Response::ContinueTraversal;
 }
 
+Response CSGTreeEvaluator::visit(State& state, const MorphNode& node) {
+  if (state.isPostfix()) {
+    const auto& vc = this->visitedchildren[node.index()];
+    if (!vc.empty()) {
+      auto first_child = vc.front();
+      std::shared_ptr<CSGNode> t1(this->stored_term[first_child->index()]);
+      for (const auto& chnode : vc) {
+        if (chnode != first_child) {
+          this->stored_term.erase(chnode->index()); // Discard morph targets in F5 preview
+        }
+      }
+      this->stored_term[node.index()] = t1;
+    } else {
+      this->stored_term[node.index()] = CSGNode::createEmptySet();
+    }
+    addToParent(state, node);
+  }
+  return Response::ContinueTraversal;
+}
+
 /*!
    Adds ourself to out parent's list of traversed children.
    Call this for _every_ node which affects output during traversal.

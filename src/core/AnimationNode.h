@@ -3,6 +3,16 @@
 #include "core/node.h"
 #include "core/Value.h"
 
+class MorphNode : public AbstractNode {
+public:
+    VISITABLE();
+    std::string morph_name;
+    Value animations;
+    MorphNode(const ModuleInstantiation *mi, std::string name, Value anims)
+      : AbstractNode(mi), morph_name(std::move(name)), animations(std::move(anims)) {}
+    std::string name() const override { return "morph"; }
+};
+
 class ArmatureNode : public AbstractNode {
 public:
     VISITABLE();

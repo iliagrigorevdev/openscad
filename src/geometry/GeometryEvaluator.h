@@ -52,6 +52,7 @@ public:
 
   Response visit(State& state, const ArmatureNode& node) override;
   Response visit(State& state, const BoneNode& node) override;
+  Response visit(State& state, const MorphNode& node) override;
 
   [[nodiscard]] const Tree& getTree() const { return this->tree; }
 

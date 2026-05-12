@@ -42,3 +42,28 @@ public:
     std::unique_ptr<Geometry> copy() const override { return std::make_unique<BoneGeometry>(*this); }
     std::string dump() const override { return "BoneGeometry(" + name + ")\n" + GeometryList::dump(); }
 };
+
+class MorphGeometry : public GeometryList {
+public:
+    std::string name;
+    Value animations;
+    Transform3d world_matrix;
+    GeometryList::Geometries targets;
+
+    MorphGeometry(std::string name, Value anims, Transform3d w_mat = Transform3d::Identity())
+        : GeometryList(Geometry::Geometries()), name(std::move(name)), animations(std::move(anims)), world_matrix(w_mat) {}
+
+    MorphGeometry(const MorphGeometry& other)
+        : GeometryList(other), name(other.name), animations(other.animations.clone()), world_matrix(other.world_matrix), targets(other.targets) {}
+
+    void accept(GeometryVisitor& visitor) const override {
+        visitor.visit(static_cast<const GeometryList&>(*this));
+    }
+    size_t memsize() const override {
+        size_t m = GeometryList::memsize() + sizeof(MorphGeometry);
+        for (const auto& item : targets) m += item.second->memsize();
+        return m;
+    }
+    std::unique_ptr<Geometry> copy() const override { return std::make_unique<MorphGeometry>(*this); }
+    std::string dump() const override { return "MorphGeometry(" + name + ")\n" + GeometryList::dump(); }
+};

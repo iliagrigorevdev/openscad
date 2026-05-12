@@ -49,6 +49,10 @@ struct MeshInfo {
     std::shared_ptr<const PolySet> ps;
     int target_node = -1;
     int joint_idx = -1;
+    std::vector<std::vector<float>> target_positions;
+    std::vector<std::vector<double>> target_min_pos;
+    std::vector<std::vector<double>> target_max_pos;
+    std::vector<double> weights;
 };
 
 // Map Z-Up (OpenSCAD) to Y-Up (glTF)
@@ -63,11 +67,12 @@ Transform3d get_z_to_y_up_matrix() {
 
 // Helper: Checks if a GeometryList implicitly contains a bone inside it.
 // If it does not, we can safely bake the entire sub-tree into an absolute PolySet mesh.
-bool contains_bone(const std::shared_ptr<const Geometry>& geom) {
+bool contains_animated_node(const std::shared_ptr<const Geometry>& geom) {
     if (std::dynamic_pointer_cast<const BoneGeometry>(geom)) return true;
+    if (std::dynamic_pointer_cast<const MorphGeometry>(geom)) return true;
     if (auto gl = std::dynamic_pointer_cast<const GeometryList>(geom)) {
         for (const auto& item : gl->getChildren()) {
-            if (contains_bone(item.second)) return true;
+            if (contains_animated_node(item.second)) return true;
         }
     }
     return false;
@@ -75,14 +80,20 @@ bool contains_bone(const std::shared_ptr<const Geometry>& geom) {
 
 int traverse_gltf(const std::shared_ptr<const Geometry>& geom, int parent_node_idx, 
                   tinygltf::Model& model, std::vector<MeshInfo>& meshes_info, 
-                  std::map<std::string, int>& bone_to_node, Value& global_anims, 
+                  std::map<std::string, int>& bone_to_node, std::map<std::string, bool>& is_morph_node, Value& global_anims,
                   Transform3d C, Transform3d M_accum, int current_joint_idx,
                   std::vector<int>& gltf_joints, std::vector<Transform3d>& inverse_bind_matrices,
                   std::vector<int>& scene_nodes) 
 {
     if (auto armature = std::dynamic_pointer_cast<const ArmatureGeometry>(geom)) {
         if (armature->animations.type() == Value::Type::VECTOR) {
-             global_anims = armature->animations.clone(); 
+            if (global_anims.type() != Value::Type::VECTOR) global_anims = armature->animations.clone();
+            else {
+                Value merged = Value::VectorType::Empty();
+                for (const auto& a : global_anims.toVector()) merged.toVectorNonConst().emplace_back(a.clone());
+                for (const auto& a : armature->animations.toVector()) merged.toVectorNonConst().emplace_back(a.clone());
+                global_anims = std::move(merged);
+            }
         }
         int node_idx = model.nodes.size();
         tinygltf::Node node;
@@ -93,7 +104,7 @@ int traverse_gltf(const std::shared_ptr<const Geometry>& geom, int parent_node_i
         if (parent_node_idx < 0) scene_nodes.push_back(node_idx);
         
         for (const auto& item : armature->getChildren()) {
-            int child_idx = traverse_gltf(item.second, node_idx, model, meshes_info, bone_to_node, global_anims, C, M_accum, current_joint_idx, gltf_joints, inverse_bind_matrices, scene_nodes);
+            int child_idx = traverse_gltf(item.second, node_idx, model, meshes_info, bone_to_node, is_morph_node, global_anims, C, M_accum, current_joint_idx, gltf_joints, inverse_bind_matrices, scene_nodes);
             if (child_idx >= 0) model.nodes[node_idx].children.push_back(child_idx);
         }
         return node_idx;
@@ -134,16 +145,124 @@ int traverse_gltf(const std::shared_ptr<const Geometry>& geom, int parent_node_i
         inverse_bind_matrices.push_back(inv_bind);
         
         for (const auto& item : bone->getChildren()) {
-            int child_idx = traverse_gltf(item.second, node_idx, model, meshes_info, bone_to_node, global_anims, C, next_M_accum, joint_idx, gltf_joints, inverse_bind_matrices, scene_nodes);
+            int child_idx = traverse_gltf(item.second, node_idx, model, meshes_info, bone_to_node, is_morph_node, global_anims, C, next_M_accum, joint_idx, gltf_joints, inverse_bind_matrices, scene_nodes);
             if (child_idx >= 0) model.nodes[node_idx].children.push_back(child_idx);
         }
         return node_idx;
     }
+    else if (auto morph = std::dynamic_pointer_cast<const MorphGeometry>(geom)) {
+        if (morph->animations.type() == Value::Type::VECTOR) {
+             if (global_anims.type() != Value::Type::VECTOR) global_anims = morph->animations.clone();
+             else {
+                 Value merged = Value::VectorType::Empty();
+                 for (const auto& a : global_anims.toVector()) merged.toVectorNonConst().emplace_back(a.clone());
+                 for (const auto& a : morph->animations.toVector()) merged.toVectorNonConst().emplace_back(a.clone());
+                 global_anims = std::move(merged);
+             }
+        }
+        int node_idx = model.nodes.size();
+        tinygltf::Node node;
+        if (!morph->name.empty()) node.name = morph->name;
+        model.nodes.push_back(node);
+
+        if (parent_node_idx < 0) scene_nodes.push_back(node_idx);
+
+        if (!morph->name.empty()) {
+            bone_to_node[morph->name] = node_idx;
+            is_morph_node[morph->name] = true;
+        }
+
+        std::shared_ptr<const PolySet> base_ps;
+        if (!morph->children.empty()) {
+            base_ps = PolySetUtils::getGeometryAsPolySet(morph->children.front().second);
+        }
+
+        if (base_ps && !base_ps->vertices.empty()) {
+            MeshInfo minfo;
+            minfo.ps = base_ps;
+            minfo.target_node = node_idx;
+            minfo.joint_idx = current_joint_idx;
+            for(int i = 0; i < 3; ++i) { minfo.min_pos[i] = FLT_MAX; minfo.max_pos[i] = -FLT_MAX; }
+
+            for (const auto& v : base_ps->vertices) {
+                Vector3d absolute_v = M_accum * v;
+                Vector3d gltf_v = C * absolute_v;
+
+                minfo.positions.push_back(gltf_v.x());
+                minfo.positions.push_back(gltf_v.y());
+                minfo.positions.push_back(gltf_v.z());
+
+                minfo.min_pos[0] = std::min(minfo.min_pos[0], (float)gltf_v.x());
+                minfo.min_pos[1] = std::min(minfo.min_pos[1], (float)gltf_v.y());
+                minfo.min_pos[2] = std::min(minfo.min_pos[2], (float)gltf_v.z());
+            }
+
+            for (const auto& tgt : morph->targets) {
+                auto target_ps = PolySetUtils::getGeometryAsPolySet(tgt.second);
+                std::vector<float> t_pos;
+                std::vector<double> t_min = {DBL_MAX, DBL_MAX, DBL_MAX};
+                std::vector<double> t_max = {-DBL_MAX, -DBL_MAX, -DBL_MAX};
+
+                if (target_ps && target_ps->vertices.size() == base_ps->vertices.size()) {
+                    for (size_t i = 0; i < target_ps->vertices.size(); ++i) {
+                        Vector3d target_absolute_v = M_accum * target_ps->vertices[i];
+                        Vector3d target_gltf_v = C * target_absolute_v;
+
+                        Vector3d base_absolute_v = M_accum * base_ps->vertices[i];
+                        Vector3d base_gltf_v = C * base_absolute_v;
+
+                        Vector3d delta = target_gltf_v - base_gltf_v;
+
+                        t_pos.push_back(delta.x());
+                        t_pos.push_back(delta.y());
+                        t_pos.push_back(delta.z());
+
+                        t_min[0] = std::min(t_min[0], (double)delta.x());
+                        t_min[1] = std::min(t_min[1], (double)delta.y());
+                        t_min[2] = std::min(t_min[2], (double)delta.z());
+                        t_max[0] = std::max(t_max[0], (double)delta.x());
+                        t_max[1] = std::max(t_max[1], (double)delta.y());
+                        t_max[2] = std::max(t_max[2], (double)delta.z());
+                    }
+                } else {
+                    t_pos.resize(base_ps->vertices.size() * 3, 0.0f);
+                    t_min = {0,0,0}; t_max = {0,0,0};
+                }
+                minfo.target_positions.push_back(std::move(t_pos));
+                minfo.target_min_pos.push_back(std::move(t_min));
+                minfo.target_max_pos.push_back(std::move(t_max));
+                minfo.weights.push_back(0.0);
+            }
+
+            std::map<int, PrimitiveInfo> prim_map;
+            for (size_t i = 0; i < base_ps->indices.size(); ++i) {
+                int color_idx = base_ps->color_indices.empty() ? -1 : base_ps->color_indices[i];
+                auto& prim = prim_map[color_idx];
+                prim.color_idx = color_idx;
+                const auto& face = base_ps->indices[i];
+                if (face.size() < 3) continue;
+                for (size_t j = 1; j + 1 < face.size(); ++j) {
+                    prim.indices.push_back(face[0]);
+                    prim.indices.push_back(face[j]);
+                    prim.indices.push_back(face[j + 1]);
+                }
+            }
+
+            for (auto& kv : prim_map) {
+                if (!kv.second.indices.empty()) {
+                    kv.second.ps = base_ps;
+                    minfo.primitives.push_back(std::move(kv.second));
+                }
+            }
+            if (!minfo.primitives.empty()) meshes_info.push_back(std::move(minfo));
+        }
+        return node_idx;
+    }
     // Only traverse GeometryList if it hides a bone structure inside it. Otherwise, bake it into a mesh!
-    else if (std::dynamic_pointer_cast<const GeometryList>(geom) && contains_bone(geom)) {
+    else if (std::dynamic_pointer_cast<const GeometryList>(geom) && contains_animated_node(geom)) {
         auto geomList = std::dynamic_pointer_cast<const GeometryList>(geom);
         for (const auto& item : geomList->getChildren()) {
-            int child_idx = traverse_gltf(item.second, parent_node_idx, model, meshes_info, bone_to_node, global_anims, C, M_accum, current_joint_idx, gltf_joints, inverse_bind_matrices, scene_nodes);
+            int child_idx = traverse_gltf(item.second, parent_node_idx, model, meshes_info, bone_to_node, is_morph_node, global_anims, C, M_accum, current_joint_idx, gltf_joints, inverse_bind_matrices, scene_nodes);
             if (child_idx >= 0 && parent_node_idx >= 0) {
                 model.nodes[parent_node_idx].children.push_back(child_idx);
             }
@@ -247,6 +366,7 @@ void export_gltf(const std::shared_ptr<const Geometry>& geom, std::ostream& outp
     
     std::vector<MeshInfo> meshes_info;
     std::map<std::string, int> bone_to_node;
+    std::map<std::string, bool> is_morph_node;
     Value global_anims = Value::undefined.clone();
     Transform3d C = get_z_to_y_up_matrix();
     std::vector<int> gltf_joints;
@@ -254,7 +374,7 @@ void export_gltf(const std::shared_ptr<const Geometry>& geom, std::ostream& outp
     std::vector<int> scene_nodes;
 
     // 1. Traverse and generate Scene Graph
-    traverse_gltf(geom, -1, model, meshes_info, bone_to_node, global_anims, C, Transform3d::Identity(), -1, gltf_joints, inverse_bind_matrices, scene_nodes);
+    traverse_gltf(geom, -1, model, meshes_info, bone_to_node, is_morph_node, global_anims, C, Transform3d::Identity(), -1, gltf_joints, inverse_bind_matrices, scene_nodes);
 
     if (meshes_info.empty() && model.nodes.empty()) return;
 
@@ -310,6 +430,14 @@ void export_gltf(const std::shared_ptr<const Geometry>& geom, std::ostream& outp
         }
 
         tinygltf::Mesh mesh;
+        if (!minfo.weights.empty()) mesh.weights = minfo.weights;
+
+        std::vector<int> target_accs;
+        for (size_t t = 0; t < minfo.target_positions.size(); ++t) {
+            target_accs.push_back(append_to_bin(bin_data, minfo.target_positions[t], model,
+                0, TINYGLTF_COMPONENT_TYPE_FLOAT, TINYGLTF_TYPE_VEC3,
+                minfo.target_min_pos[t], minfo.target_max_pos[t]));
+        }
 
         for (const auto& prim : minfo.primitives) {
             int idx_accessor_idx = append_to_bin(bin_data, prim.indices, model, 
@@ -463,6 +591,15 @@ void export_gltf(const std::shared_ptr<const Geometry>& geom, std::ostream& outp
             gltf_prim.indices = idx_accessor_idx;
             gltf_prim.material = mat_idx;
             gltf_prim.mode = TINYGLTF_MODE_TRIANGLES;
+
+            if (!target_accs.empty()) {
+                for (size_t t = 0; t < target_accs.size(); ++t) {
+                    std::map<std::string, int> target_map;
+                    target_map["POSITION"] = target_accs[t];
+                    gltf_prim.targets.push_back(target_map);
+                }
+            }
+
             mesh.primitives.push_back(gltf_prim);
         }
 
@@ -512,7 +649,69 @@ void export_gltf(const std::shared_ptr<const Geometry>& geom, std::ostream& outp
                 std::string bone_name = track[0].toStrUtf8Wrapper().toString();
                 if (bone_to_node.find(bone_name) == bone_to_node.end()) continue;
                 int node_idx = bone_to_node[bone_name];
-                
+                bool is_morph = is_morph_node[bone_name];
+
+                if (is_morph) {
+                    std::vector<float> times;
+                    std::vector<float> weights;
+                    float min_time = FLT_MAX, max_time = -FLT_MAX;
+                    int num_weights = 0;
+
+                    for (const auto& kf_val : track[1].toVector()) {
+                        if (kf_val.type() != Value::Type::VECTOR) continue;
+                        const auto& kf = kf_val.toVector();
+                        if (kf.size() > 1 && kf[1].type() == Value::Type::VECTOR) {
+                            num_weights = std::max(num_weights, (int)kf[1].toVector().size());
+                        }
+                    }
+
+                    if (num_weights == 0) continue;
+
+                    for (const auto& kf_val : track[1].toVector()) {
+                        if (kf_val.type() != Value::Type::VECTOR) continue;
+                        const auto& kf = kf_val.toVector();
+                        if (kf.empty() || kf[0].type() != Value::Type::NUMBER) continue;
+
+                        float t = kf[0].toDouble();
+                        times.push_back(t);
+                        min_time = std::min(min_time, t);
+                        max_time = std::max(max_time, t);
+
+                        if (kf.size() > 1 && kf[1].type() == Value::Type::VECTOR) {
+                            const auto& w_vec = kf[1].toVector();
+                            for (int i=0; i<num_weights; ++i) {
+                                if (i < (int)w_vec.size() && w_vec[i].type() == Value::Type::NUMBER) {
+                                    weights.push_back((float)w_vec[i].toDouble());
+                                } else {
+                                    weights.push_back(0.0f);
+                                }
+                            }
+                        } else {
+                            for (int i=0; i<num_weights; ++i) weights.push_back(0.0f);
+                        }
+                    }
+
+                    if (times.empty()) continue;
+
+                    int time_acc_idx = append_to_bin(bin_data, times, model, 0, TINYGLTF_COMPONENT_TYPE_FLOAT, TINYGLTF_TYPE_SCALAR, {(double)min_time}, {(double)max_time});
+                    int weight_acc_idx = append_to_bin(bin_data, weights, model, 0, TINYGLTF_COMPONENT_TYPE_FLOAT, TINYGLTF_TYPE_SCALAR);
+
+                    int sampler_idx = gltf_anim.samplers.size();
+                    tinygltf::AnimationSampler sampler;
+                    sampler.input = time_acc_idx;
+                    sampler.output = weight_acc_idx;
+                    sampler.interpolation = "LINEAR";
+                    gltf_anim.samplers.push_back(sampler);
+
+                    tinygltf::AnimationChannel channel;
+                    channel.sampler = sampler_idx;
+                    channel.target_node = node_idx;
+                    channel.target_path = "weights";
+                    gltf_anim.channels.push_back(channel);
+
+                    continue;
+                }
+
                 std::vector<float> times;
                 std::vector<float> rotations;
                 std::vector<float> translations;
@@ -583,7 +782,7 @@ void export_gltf(const std::shared_ptr<const Geometry>& geom, std::ostream& outp
                 sampler.output = rot_acc_idx;
                 sampler.interpolation = "LINEAR";
                 gltf_anim.samplers.push_back(sampler);
-                
+
                 tinygltf::AnimationChannel channel;
                 channel.sampler = sampler_idx;
                 channel.target_node = node_idx;

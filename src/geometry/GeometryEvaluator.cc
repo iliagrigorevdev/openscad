@@ -64,11 +64,12 @@ class Geometry;
 class Polygon2d;
 class Tree;
 
-static bool contains_bone(const std::shared_ptr<const Geometry>& geom) {
+static bool contains_animated_node(const std::shared_ptr<const Geometry>& geom) {
   if (std::dynamic_pointer_cast<const BoneGeometry>(geom)) return true;
+  if (std::dynamic_pointer_cast<const MorphGeometry>(geom)) return true;
   if (auto gl = std::dynamic_pointer_cast<const GeometryList>(geom)) {
     for (const auto& item : gl->getChildren()) {
-      if (contains_bone(item.second)) return true;
+      if (contains_animated_node(item.second)) return true;
     }
   }
   return false;
@@ -601,7 +602,7 @@ Response GeometryEvaluator::visit(State& state, const ArmatureNode& node)
         if (chnode->modinst->isBackground()) continue;
         smartCacheInsert(*chnode, chgeom);
         if (chgeom && !chgeom->isEmpty()) {
-          if (contains_bone(chgeom)) child_bones.push_back(item);
+          if (contains_animated_node(chgeom)) child_bones.push_back(item);
           else child_meshes.push_back(item);
         }
       }
@@ -659,7 +660,7 @@ Response GeometryEvaluator::visit(State& state, const BoneNode& node)
         if (chnode->modinst->isBackground()) continue;
         smartCacheInsert(*chnode, chgeom);
         if (chgeom && !chgeom->isEmpty()) {
-          if (contains_bone(chgeom)) child_bones.push_back(item);
+          if (contains_animated_node(chgeom)) child_bones.push_back(item);
           else child_meshes.push_back(item);
         }
       }
@@ -687,6 +688,48 @@ Response GeometryEvaluator::visit(State& state, const BoneNode& node)
       auto boneGeom = std::make_shared<BoneGeometry>(node.bone_name, node.matrix, state.matrix());
       boneGeom->children = std::move(final_geometries);
       geom = boneGeom;
+    } else {
+      geom = smartCacheGet(node, state.preferNef());
+    }
+    addToParent(state, node, geom);
+    node.progress_report();
+  }
+  return Response::ContinueTraversal;
+}
+
+Response GeometryEvaluator::visit(State& state, const MorphNode& node)
+{
+  if (state.isPrefix()) {
+    if (node.modinst->isBackground()) {
+      state.setBackground(true);
+      return Response::PruneTraversal;
+    }
+    if (isSmartCached(node)) return Response::PruneTraversal;
+    state.setPreferNef(true);
+  }
+  if (state.isPostfix()) {
+    std::shared_ptr<const Geometry> geom;
+    if (!isSmartCached(node)) {
+      unsigned int dim = 0;
+      GeometryList::Geometries children;
+      GeometryList::Geometries targets;
+      bool first = true;
+      for (const auto& item : this->visitedchildren[node.index()]) {
+        if (!isValidDim(item, dim)) break;
+        auto& chnode = item.first;
+        const std::shared_ptr<const Geometry>& chgeom = item.second;
+        if (chnode->modinst->isBackground()) continue;
+        smartCacheInsert(*chnode, chgeom);
+        if (chgeom && !chgeom->isEmpty()) {
+            if (first) { children.push_back(item); first = false; }
+            else { targets.push_back(item); }
+        }
+      }
+
+      auto morphGeom = std::make_shared<MorphGeometry>(node.morph_name, node.animations.clone(), state.matrix());
+      morphGeom->children = std::move(children);
+      morphGeom->targets = std::move(targets);
+      geom = morphGeom;
     } else {
       geom = smartCacheGet(node, state.preferNef());
     }

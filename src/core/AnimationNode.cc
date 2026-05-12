@@ -32,7 +32,14 @@ std::shared_ptr<AbstractNode> builtin_bone(const ModuleInstantiation *inst, Argu
     return children.instantiate(std::make_shared<BoneNode>(inst, name, mat));
 }
 
+std::shared_ptr<AbstractNode> builtin_morph(const ModuleInstantiation *inst, Arguments arguments, const Children& children) {
+    Parameters parameters = Parameters::parse(std::move(arguments), inst->location(), {"name", "animations"});
+    std::string name = parameters["name"].toStrUtf8Wrapper().toString();
+    return children.instantiate(std::make_shared<MorphNode>(inst, name, parameters["animations"].clone()));
+}
+
 void register_builtin_animation() {
     Builtins::init("armature", new BuiltinModule(builtin_armature), {"armature(animations=array)"});
     Builtins::init("bone", new BuiltinModule(builtin_bone), {"bone(name=\"\", t=[x,y,z], r=[x,y,z])"});
+    Builtins::init("morph", new BuiltinModule(builtin_morph), {"morph(name=\"\", animations=[])"});
 }
